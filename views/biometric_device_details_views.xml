@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<odoo>
+    <!-- Inherited Biometric Device Form View -->
+    <record id="view_biometric_device_details_form_inherit_infs" model="ir.ui.view">
+        <field name="name">biometric.device.details.form.inherit.infs</field>
+        <field name="model">biometric.device.details</field>
+        <field name="inherit_id" ref="hr_zk_attendance.biometric_device_details_view_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//field[@name='address_id']" position="after">
+                <field name="device_tz"/>
+                <field name="device_type" widget="radio"/>
+            </xpath>
+        </field>
+    </record>
+
+    <!-- Inherited Biometric Device Tree View -->
+    <record id="view_biometric_device_details_tree_inherit_infs" model="ir.ui.view">
+        <field name="name">biometric.device.details.tree.inherit.infs</field>
+        <field name="model">biometric.device.details</field>
+        <field name="inherit_id" ref="hr_zk_attendance.biometric_device_details_view_tree"/>
+        <field name="arch" type="xml">
+            <xpath expr="//field[@name='port_number']" position="after">
+                <field name="device_tz"/>
+                <field name="device_type"/>
+            </xpath>
+        </field>
+    </record>
+</odoo>

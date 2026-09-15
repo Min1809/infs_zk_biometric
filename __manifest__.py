@@ -18,6 +18,7 @@ This module extends `hr_zk_attendance` with dedicated biometric device roles:
     'depends': ['hr_zk_attendance', 'hr_attendance'],
     'data': [
         'views/biometric_device_details_views.xml',
+        'views/daily_attendance_views.xml',
     ],
     'installable': True,
     'auto_install': False,

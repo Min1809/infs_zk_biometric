@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Search View for Daily Attendance (Attendance Analysis) -->
+    <record id="view_daily_attendance_search" model="ir.ui.view">
+        <field name="name">daily.attendance.search</field>
+        <field name="model">daily.attendance</field>
+        <field name="arch" type="xml">
+            <search string="Attendance Analysis Search">
+                <!-- Search Fields -->
+                <field name="employee_id" string="Employee"/>
+                <field name="department_id" string="Department"/>
+                <field name="punching_time" string="Punching Time"/>
+                <field name="punch_type" string="Punching Type"/>
+                <field name="attendance_type" string="Category"/>
+                <field name="address_id" string="Working Address"/>
+
+                <!-- Preset Date Filters -->
+                <filter string="Today" name="filter_today"
+                        domain="[
+                            ('punching_time', '&gt;=', (datetime.datetime.combine(context_today(), datetime.time(0, 0, 0)).to_utc()).strftime('%Y-%m-%d %H:%M:%S')),
+                            ('punching_time', '&lt;=', (datetime.datetime.combine(context_today(), datetime.time(23, 59, 59)).to_utc()).strftime('%Y-%m-%d %H:%M:%S'))
+                        ]"/>
+                <filter string="Yesterday" name="filter_yesterday"
+                        domain="[
+                            ('punching_time', '&gt;=', (datetime.datetime.combine(context_today() - datetime.timedelta(days=1), datetime.time(0, 0, 0)).to_utc()).strftime('%Y-%m-%d %H:%M:%S')),
+                            ('punching_time', '&lt;=', (datetime.datetime.combine(context_today() - datetime.timedelta(days=1), datetime.time(23, 59, 59)).to_utc()).strftime('%Y-%m-%d %H:%M:%S'))
+                        ]"/>
+                <filter string="Last 7 Days" name="filter_last_7_days"
+                        domain="[
+                            ('punching_time', '&gt;=', (datetime.datetime.combine(context_today() - datetime.timedelta(days=7), datetime.time(0, 0, 0)).to_utc()).strftime('%Y-%m-%d %H:%M:%S'))
+                        ]"/>
+                <filter string="Current Month" name="filter_current_month"
+                        domain="[
+                            ('punching_time', '&gt;=', (datetime.datetime.combine(context_today() + relativedelta(day=1), datetime.time(0, 0, 0)).to_utc()).strftime('%Y-%m-%d %H:%M:%S'))
+                        ]"/>
+
+                <separator/>
+                <!-- Custom Date filter (Odoo Date picker component) -->
+                <filter string="Custom Date" name="filter_custom_date" date="punching_time"/>
+
+                <separator/>
+                <!-- Punch Type Filters -->
+                <filter string="Check-In" name="filter_check_in" domain="[('punch_type', '=', '0')]"/>
+                <filter string="Check-Out" name="filter_check_out" domain="[('punch_type', '=', '1')]"/>
+
+                <!-- Group By -->
+                <group expand="0" string="Group By">
+                    <filter string="Employee" name="group_by_employee" context="{'group_by': 'employee_id'}"/>
+                    <filter string="Department" name="group_by_department" context="{'group_by': 'department_id'}"/>
+                    <filter string="Date (Day)" name="group_by_day" context="{'group_by': 'punching_time:day'}"/>
+                    <filter string="Date (Month)" name="group_by_month" context="{'group_by': 'punching_time:month'}"/>
+                    <filter string="Punching Type" name="group_by_punch_type" context="{'group_by': 'punch_type'}"/>
+                    <filter string="Category" name="group_by_category" context="{'group_by': 'attendance_type'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <!-- Inherit Tree View to add Department and visual badges -->
+    <record id="daily_attendance_view_tree_inherit" model="ir.ui.view">
+        <field name="name">daily.attendance.view.tree.inherit</field>
+        <field name="model">daily.attendance</field>
+        <field name="inherit_id" ref="hr_zk_attendance.daily_attendance_view_tree"/>
+        <field name="arch" type="xml">
+            <xpath expr="//field[@name='employee_id']" position="after">
+                <field name="department_id" optional="show"/>
+            </xpath>
+            <xpath expr="//field[@name='punch_type']" position="attributes">
+                <attribute name="widget">badge</attribute>
+                <attribute name="decoration-success">punch_type == '0'</attribute>
+                <attribute name="decoration-danger">punch_type == '1'</attribute>
+                <attribute name="decoration-warning">punch_type in ('2', '3')</attribute>
+                <attribute name="decoration-info">punch_type in ('4', '5')</attribute>
+            </xpath>
+            <xpath expr="//field[@name='attendance_type']" position="attributes">
+                <attribute name="widget">badge</attribute>
+            </xpath>
+        </field>
+    </record>
+
+    <!-- Link Search View to Action & set Today as default filter -->
+    <record id="hr_zk_attendance.daily_attendance_action" model="ir.actions.act_window">
+        <field name="search_view_id" ref="view_daily_attendance_search"/>
+        <field name="context">{'search_default_filter_today': 1}</field>
+    </record>
+</odoo>

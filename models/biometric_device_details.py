@@ -96,8 +96,8 @@ class BiometricDeviceDetails(models.Model):
     def action_download_attendance(self):
         """Override download attendance to handle dedicated Entrance/Exit roles without altering device clock"""
         _logger.info("++++++++++++ INFS ZK Attendance Sync Executed ++++++++++++++++++++++")
-        zk_attendance = self.env['zk.machine.attendance']
-        hr_attendance = self.env['hr.attendance']
+        zk_attendance = self.env['zk.machine.attendance'].sudo()
+        hr_attendance = self.env['hr.attendance'].sudo()
 
         for info in self:
             machine_ip = info.device_ip
@@ -141,10 +141,10 @@ class BiometricDeviceDetails(models.Model):
                             continue
 
                         emp_name = user_dict.get(uid_str, f"Employee {uid_str}")
-                        get_user_id = self.env['hr.employee'].search(
+                        get_user_id = self.env['hr.employee'].sudo().search(
                             [('device_id_num', '=', uid_str)], limit=1)
                         if not get_user_id:
-                            get_user_id = self.env['hr.employee'].create({
+                            get_user_id = self.env['hr.employee'].sudo().create({
                                 'device_id_num': uid_str,
                                 'name': emp_name
                             })

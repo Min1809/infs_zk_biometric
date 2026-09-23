@@ -202,7 +202,7 @@ class BiometricDeviceDetails(models.Model):
                                         delta_seconds = (utc_naive - open_att.check_in).total_seconds()
                                         if delta_seconds > 0:
                                             auto_checkout = min(
-                                                open_att.check_in + datetime.timedelta(hours=9),
+                                                open_att.check_in + datetime.timedelta(hours=8),
                                                 utc_naive - datetime.timedelta(seconds=1)
                                             )
                                             open_att.write({'check_out': auto_checkout})
@@ -247,7 +247,7 @@ class BiometricDeviceDetails(models.Model):
                                     elif punch_local_date > check_in_local_date:
                                         if delta_seconds > 0:
                                             auto_checkout = min(
-                                                open_att.check_in + datetime.timedelta(hours=9),
+                                                open_att.check_in + datetime.timedelta(hours=8),
                                                 utc_naive - datetime.timedelta(seconds=1)
                                             )
                                             open_att.write({'check_out': auto_checkout})
@@ -279,7 +279,7 @@ class BiometricDeviceDetails(models.Model):
                                     elif punch_local_date > check_in_local_date:
                                         if delta_seconds > 0:
                                             auto_checkout = min(
-                                                open_att.check_in + datetime.timedelta(hours=9),
+                                                open_att.check_in + datetime.timedelta(hours=8),
                                                 utc_naive - datetime.timedelta(seconds=1)
                                             )
                                             open_att.write({'check_out': auto_checkout})

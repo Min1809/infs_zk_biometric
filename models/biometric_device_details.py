@@ -127,6 +127,7 @@ class BiometricDeviceDetails(models.Model):
                     attendance = sorted(attendance, key=lambda a: a.timestamp)
                     valid_att_types = dict(zk_attendance._fields['attendance_type'].selection)
                     valid_punch_types = dict(zk_attendance._fields['punch_type'].selection)
+                    new_punches_count = 0
 
                     for each in attendance:
                         atten_time_naive = each.timestamp
@@ -153,144 +154,164 @@ class BiometricDeviceDetails(models.Model):
                         duplicate_atten_ids = zk_attendance.search(
                             [('device_id_num', '=', uid_str),
                              ('punching_time', '=', atten_time_str)], limit=1)
-                        if not duplicate_atten_ids:
-                            att_type_val = str(each.status) if str(each.status) in valid_att_types else '0'
-                            punch_type_val = str(each.punch) if str(each.punch) in valid_punch_types else '0'
+                        if duplicate_atten_ids:
+                            # Already downloaded and synced in a previous fetch -> Skip to prevent re-processing historical logs against today's state
+                            continue
 
-                            zk_attendance.create({
-                                'employee_id': get_user_id.id,
-                                'device_id_num': uid_str,
-                                'attendance_type': att_type_val,
-                                'punch_type': punch_type_val,
-                                'punching_time': atten_time_str,
-                                'address_id': info.address_id.id
-                            })
+                        att_type_val = str(each.status) if str(each.status) in valid_att_types else '0'
+                        punch_type_val = str(each.punch) if str(each.punch) in valid_punch_types else '0'
+
+                        zk_attendance.create({
+                            'employee_id': get_user_id.id,
+                            'device_id_num': uid_str,
+                            'attendance_type': att_type_val,
+                            'punch_type': punch_type_val,
+                            'punching_time': atten_time_str,
+                            'address_id': info.address_id.id
+                        })
+                        new_punches_count += 1
 
                         # 2. Sync to hr.attendance based on Device Role
-                        open_att = hr_attendance.search([
-                            ('employee_id', '=', get_user_id.id),
-                            ('check_out', '=', False)
-                        ], order='check_in desc', limit=1)
+                        try:
+                            # Check if punch falls inside an existing closed attendance to prevent overlapping errors
+                            overlapping = hr_attendance.search([
+                                ('employee_id', '=', get_user_id.id),
+                                ('check_in', '<=', utc_naive),
+                                ('check_out', '>=', utc_naive),
+                            ], limit=1)
+                            if overlapping:
+                                continue
 
-                        if info.device_type == 'check_in':
-                            # ENTRANCE DEVICE (Check-In Only)
-                            if open_att:
-                                check_in_utc = pytz.utc.localize(open_att.check_in)
-                                check_in_local_dt = check_in_utc.astimezone(local_tz)
-                                check_in_local_date = check_in_local_dt.date()
+                            open_att = hr_attendance.search([
+                                ('employee_id', '=', get_user_id.id),
+                                ('check_out', '=', False)
+                            ], order='check_in desc', limit=1)
 
-                                if punch_local_date == check_in_local_date:
-                                    # Already checked in today: Door access / break re-entry -> DO NOT checkout!
-                                    continue
-                                elif punch_local_date > check_in_local_date:
-                                    # Unclosed shift from yesterday: Auto-close yesterday and open today's check-in
+                            if info.device_type == 'check_in':
+                                # ENTRANCE DEVICE (Check-In Only)
+                                if open_att:
+                                    check_in_utc = pytz.utc.localize(open_att.check_in)
+                                    check_in_local_dt = check_in_utc.astimezone(local_tz)
+                                    check_in_local_date = check_in_local_dt.date()
+
+                                    if punch_local_date == check_in_local_date:
+                                        # Already checked in today: Door access / break re-entry -> DO NOT checkout!
+                                        continue
+                                    elif punch_local_date > check_in_local_date:
+                                        # Unclosed shift from yesterday: Auto-close yesterday and open today's check-in
+                                        delta_seconds = (utc_naive - open_att.check_in).total_seconds()
+                                        if delta_seconds > 0:
+                                            auto_checkout = min(
+                                                open_att.check_in + datetime.timedelta(hours=9),
+                                                utc_naive - datetime.timedelta(seconds=1)
+                                            )
+                                            open_att.write({'check_out': auto_checkout})
+                                        hr_attendance.create({
+                                            'employee_id': get_user_id.id,
+                                            'check_in': utc_naive
+                                        })
+                                else:
+                                    # No open attendance: Check if employee already completed shift today or checked out recently
+                                    last_closed_att = hr_attendance.search([
+                                        ('employee_id', '=', get_user_id.id),
+                                        ('check_out', '!=', False)
+                                    ], order='check_out desc', limit=1)
+
+                                    if last_closed_att:
+                                        last_out_utc = pytz.utc.localize(last_closed_att.check_out)
+                                        last_out_local_date = last_out_utc.astimezone(local_tz).date()
+                                        if punch_local_date == last_out_local_date:
+                                            # Already completed shift today: Evening entrance tap is door access re-entry
+                                            continue
+
+                                        diff_since_checkout = (utc_naive - last_closed_att.check_out).total_seconds()
+                                        if 0 <= diff_since_checkout < 300:
+                                            continue
+
+                                    hr_attendance.create({
+                                        'employee_id': get_user_id.id,
+                                        'check_in': utc_naive
+                                    })
+
+                            elif info.device_type == 'check_out':
+                                # EXIT DEVICE (Check-Out Only)
+                                if open_att:
+                                    check_in_utc = pytz.utc.localize(open_att.check_in)
+                                    check_in_local_dt = check_in_utc.astimezone(local_tz)
+                                    check_in_local_date = check_in_local_dt.date()
                                     delta_seconds = (utc_naive - open_att.check_in).total_seconds()
-                                    if delta_seconds > 0:
-                                        auto_checkout = min(
-                                            open_att.check_in + datetime.timedelta(hours=9),
-                                            utc_naive - datetime.timedelta(seconds=1)
-                                        )
-                                        open_att.write({'check_out': auto_checkout})
-                                    hr_attendance.create({
-                                        'employee_id': get_user_id.id,
-                                        'check_in': utc_naive
-                                    })
+
+                                    if punch_local_date == check_in_local_date:
+                                        if delta_seconds >= 60:
+                                            open_att.write({'check_out': utc_naive})
+                                    elif punch_local_date > check_in_local_date:
+                                        if delta_seconds > 0:
+                                            auto_checkout = min(
+                                                open_att.check_in + datetime.timedelta(hours=9),
+                                                utc_naive - datetime.timedelta(seconds=1)
+                                            )
+                                            open_att.write({'check_out': auto_checkout})
+                                else:
+                                    # No active check-in: Check if employee checked out earlier today and is tapping exit again
+                                    last_closed_att = hr_attendance.search([
+                                        ('employee_id', '=', get_user_id.id),
+                                        ('check_out', '!=', False)
+                                    ], order='check_out desc', limit=1)
+
+                                    if last_closed_att:
+                                        last_out_utc = pytz.utc.localize(last_closed_att.check_out)
+                                        last_out_local_date = last_out_utc.astimezone(local_tz).date()
+                                        if punch_local_date == last_out_local_date and utc_naive > last_closed_att.check_out:
+                                            # Update departure to latest exit punch
+                                            last_closed_att.write({'check_out': utc_naive})
+
                             else:
-                                # No open attendance: Check if employee checked out very recently (< 5 mins ago)
-                                last_closed_att = hr_attendance.search([
-                                    ('employee_id', '=', get_user_id.id),
-                                    ('check_out', '!=', False)
-                                ], order='check_out desc', limit=1)
+                                # BOTH / TOGGLE (Standard alternating behavior)
+                                if open_att:
+                                    check_in_utc = pytz.utc.localize(open_att.check_in)
+                                    check_in_local_dt = check_in_utc.astimezone(local_tz)
+                                    check_in_local_date = check_in_local_dt.date()
+                                    delta_seconds = (utc_naive - open_att.check_in).total_seconds()
 
-                                is_door_test = False
-                                if last_closed_att:
-                                    diff_since_checkout = (utc_naive - last_closed_att.check_out).total_seconds()
-                                    if 0 <= diff_since_checkout < 300:
-                                        is_door_test = True
+                                    if punch_local_date == check_in_local_date:
+                                        if delta_seconds >= 120:
+                                            open_att.write({'check_out': utc_naive})
+                                    elif punch_local_date > check_in_local_date:
+                                        if delta_seconds > 0:
+                                            auto_checkout = min(
+                                                open_att.check_in + datetime.timedelta(hours=9),
+                                                utc_naive - datetime.timedelta(seconds=1)
+                                            )
+                                            open_att.write({'check_out': auto_checkout})
+                                        hr_attendance.create({
+                                            'employee_id': get_user_id.id,
+                                            'check_in': utc_naive
+                                        })
+                                else:
+                                    last_closed_att = hr_attendance.search([
+                                        ('employee_id', '=', get_user_id.id),
+                                        ('check_out', '!=', False)
+                                    ], order='check_out desc', limit=1)
 
-                                if not is_door_test:
-                                    hr_attendance.create({
-                                        'employee_id': get_user_id.id,
-                                        'check_in': utc_naive
-                                    })
+                                    is_door_test = False
+                                    if last_closed_att:
+                                        diff_since_checkout = (utc_naive - last_closed_att.check_out).total_seconds()
+                                        if 0 <= diff_since_checkout < 300:
+                                            is_door_test = True
 
-                        elif info.device_type == 'check_out':
-                            # EXIT DEVICE (Check-Out Only)
-                            if open_att:
-                                check_in_utc = pytz.utc.localize(open_att.check_in)
-                                check_in_local_dt = check_in_utc.astimezone(local_tz)
-                                check_in_local_date = check_in_local_dt.date()
-                                delta_seconds = (utc_naive - open_att.check_in).total_seconds()
-
-                                if punch_local_date == check_in_local_date:
-                                    if delta_seconds >= 60:
-                                        open_att.write({'check_out': utc_naive})
-                                elif punch_local_date > check_in_local_date:
-                                    if delta_seconds > 0:
-                                        auto_checkout = min(
-                                            open_att.check_in + datetime.timedelta(hours=9),
-                                            utc_naive - datetime.timedelta(seconds=1)
-                                        )
-                                        open_att.write({'check_out': auto_checkout})
-                            else:
-                                # No active check-in: Check if employee checked out earlier today and is tapping exit again
-                                last_closed_att = hr_attendance.search([
-                                    ('employee_id', '=', get_user_id.id),
-                                    ('check_out', '!=', False)
-                                ], order='check_out desc', limit=1)
-
-                                if last_closed_att:
-                                    last_out_utc = pytz.utc.localize(last_closed_att.check_out)
-                                    last_out_local_date = last_out_utc.astimezone(local_tz).date()
-                                    if punch_local_date == last_out_local_date and utc_naive > last_closed_att.check_out:
-                                        # Update departure to latest exit punch
-                                        last_closed_att.write({'check_out': utc_naive})
-
-                        else:
-                            # BOTH / TOGGLE (Standard alternating behavior)
-                            if open_att:
-                                check_in_utc = pytz.utc.localize(open_att.check_in)
-                                check_in_local_dt = check_in_utc.astimezone(local_tz)
-                                check_in_local_date = check_in_local_dt.date()
-                                delta_seconds = (utc_naive - open_att.check_in).total_seconds()
-
-                                if punch_local_date == check_in_local_date:
-                                    if delta_seconds >= 120:
-                                        open_att.write({'check_out': utc_naive})
-                                elif punch_local_date > check_in_local_date:
-                                    if delta_seconds > 0:
-                                        auto_checkout = min(
-                                            open_att.check_in + datetime.timedelta(hours=9),
-                                            utc_naive - datetime.timedelta(seconds=1)
-                                        )
-                                        open_att.write({'check_out': auto_checkout})
-                                    hr_attendance.create({
-                                        'employee_id': get_user_id.id,
-                                        'check_in': utc_naive
-                                    })
-                            else:
-                                last_closed_att = hr_attendance.search([
-                                    ('employee_id', '=', get_user_id.id),
-                                    ('check_out', '!=', False)
-                                ], order='check_out desc', limit=1)
-
-                                is_door_test = False
-                                if last_closed_att:
-                                    diff_since_checkout = (utc_naive - last_closed_att.check_out).total_seconds()
-                                    if 0 <= diff_since_checkout < 300:
-                                        is_door_test = True
-
-                                if not is_door_test:
-                                    hr_attendance.create({
-                                        'employee_id': get_user_id.id,
-                                        'check_in': utc_naive
-                                    })
+                                    if not is_door_test:
+                                        hr_attendance.create({
+                                            'employee_id': get_user_id.id,
+                                            'check_in': utc_naive
+                                        })
+                        except Exception as punch_err:
+                            _logger.warning("Could not sync punch for %s at %s: %s", get_user_id.name, atten_time_str, punch_err)
 
                     return {
                         'type': 'ir.actions.client',
                         'tag': 'display_notification',
                         'params': {
-                            'message': _('Successfully processed %d attendance record(s) on %s.') % (len(attendance), info.name),
+                            'message': _('Successfully processed %d record(s) (%d new) on %s.') % (len(attendance), new_punches_count, info.name),
                             'type': 'success',
                             'sticky': False
                         }

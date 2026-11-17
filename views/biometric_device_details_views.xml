@@ -6,6 +6,24 @@
         <field name="model">biometric.device.details</field>
         <field name="inherit_id" ref="hr_zk_attendance.biometric_device_details_view_form"/>
         <field name="arch" type="xml">
+            <xpath expr="//header" position="inside">
+                <button name="action_sync_device_users"
+                        string="Sync Users"
+                        type="object"
+                        class="btn-secondary"
+                        icon="fa-users"
+                        help="Fetch all users stored on this biometric device into Odoo Device User List"/>
+            </xpath>
+            <xpath expr="//sheet/group" position="before">
+                <div class="oe_button_box" name="button_box">
+                    <button name="action_view_device_users"
+                            type="object"
+                            class="oe_stat_button"
+                            icon="fa-users">
+                        <field name="device_user_count" widget="statinfo" string="Device Users"/>
+                    </button>
+                </div>
+            </xpath>
             <xpath expr="//field[@name='address_id']" position="after">
                 <field name="device_tz"/>
                 <field name="device_type" widget="radio"/>
@@ -22,6 +40,7 @@
             <xpath expr="//field[@name='port_number']" position="after">
                 <field name="device_tz"/>
                 <field name="device_type"/>
+                <field name="device_user_count" string="Users"/>
             </xpath>
         </field>
     </record>

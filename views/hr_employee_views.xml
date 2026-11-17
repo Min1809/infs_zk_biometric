@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_employee_form_inherit_infs_zk" model="ir.ui.view">
+        <field name="name">hr.employee.view.form.inherit.infs.zk</field>
+        <field name="model">hr.employee</field>
+        <field name="inherit_id" ref="hr_zk_attendance.view_employee_form"/>
+        <field name="arch" type="xml">
+            <!-- Header button for quick access -->
+            <xpath expr="//header" position="inside">
+                <button name="action_create_user_on_device"
+                        string="Create / Sync in Biometric Device"
+                        type="object"
+                        class="btn-secondary"
+                        icon="fa-id-badge"
+                        groups="hr.group_hr_user"
+                        help="Create or update this employee on all configured ZKTeco fingerprint devices and link Biometric Device ID"/>
+            </xpath>
+
+            <!-- Enhance device_id_num in HR Settings tab with inline action button & synced devices -->
+            <xpath expr="//field[@name='device_id_num']" position="replace">
+                <label for="device_id_num"/>
+                <div class="o_row">
+                    <field name="device_id_num" placeholder="Auto-generated if left empty"/>
+                    <button name="action_create_user_on_device"
+                            string="Send to Fingerprint Device"
+                            type="object"
+                            class="btn-link"
+                            icon="fa-upload"
+                            groups="hr.group_hr_user"
+                            help="Create this employee on all configured biometric devices and assign Biometric Device ID"/>
+                </div>
+                <field name="is_synced_to_biometric" invisible="1"/>
+                <field name="biometric_user_ids"
+                       widget="many2many_tags"
+                       readonly="1"
+                       string="Synced Biometric Devices"
+                       invisible="not is_synced_to_biometric"/>
+            </xpath>
+        </field>
+    </record>
+</odoo>
+

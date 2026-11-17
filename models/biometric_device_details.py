@@ -53,6 +53,121 @@ class BiometricDeviceDetails(models.Model):
         help="Timezone of the physical location where this device is installed. Defaults to Thailand (UTC+7:00 Bangkok)."
     )
 
+    device_user_ids = fields.One2many(
+        'biometric.device.user',
+        'device_id',
+        string='Device Users',
+    )
+    device_user_count = fields.Integer(
+        string='Device Users Count',
+        compute='_compute_device_user_count',
+    )
+
+    def _compute_device_user_count(self):
+        for rec in self:
+            rec.device_user_count = len(rec.device_user_ids)
+
+    def _sync_users_from_device(self):
+        """Connect to this device, fetch users via conn.get_users(), and sync to biometric.device.user"""
+        self.ensure_one()
+        try:
+            zk = ZK(self.device_ip, port=self.port_number, timeout=15,
+                    password=0, force_udp=False, ommit_ping=False)
+        except NameError:
+            raise UserError(_("Pyzk module not Found. Please install it with 'pip3 install pyzk'."))
+
+        conn = None
+        try:
+            conn = self.device_connect(zk)
+            if not conn:
+                raise UserError(_('Unable to connect to %s (%s), please check parameters and network connection.') % (self.name, self.device_ip))
+
+            conn.disable_device()
+            zk_users = conn.get_users() or []
+            DeviceUser = self.env['biometric.device.user'].sudo()
+            Employee = self.env['hr.employee'].sudo()
+
+            existing_records = DeviceUser.search([('device_id', '=', self.id)])
+            existing_by_uid = {r.user_id: r for r in existing_records if r.user_id}
+
+            employees = Employee.search([('device_id_num', '!=', False)])
+            emp_by_dev_id = {emp.device_id_num.strip(): emp.id for emp in employees if emp.device_id_num and emp.device_id_num.strip()}
+
+            valid_privs = {'0', '2', '6', '14'}
+            now_dt = fields.Datetime.now()
+            synced_user_ids = set()
+
+            for u in zk_users:
+                uid_str = str(getattr(u, 'user_id', '') or '').strip()
+                if not uid_str:
+                    continue
+                synced_user_ids.add(uid_str)
+
+                priv_str = str(getattr(u, 'privilege', 0) or 0)
+                if priv_str not in valid_privs:
+                    priv_str = '14' if priv_str != '0' else '0'
+
+                card_val = getattr(u, 'card', 0)
+                card_str = str(card_val) if card_val else ''
+                u_name = (getattr(u, 'name', '') or '').strip() or f"User {uid_str}"
+
+                vals = {
+                    'device_id': self.id,
+                    'uid': getattr(u, 'uid', 0) or 0,
+                    'user_id': uid_str,
+                    'name': u_name,
+                    'privilege': priv_str,
+                    'card': card_str,
+                    'group_id': str(getattr(u, 'group_id', '') or ''),
+                    'employee_id': emp_by_dev_id.get(uid_str, False),
+                    'last_sync_date': now_dt,
+                }
+
+                if uid_str in existing_by_uid:
+                    existing_by_uid[uid_str].write(vals)
+                else:
+                    DeviceUser.create(vals)
+
+            # Remove stale user records that no longer exist on the physical device
+            stale_records = existing_records.filtered(lambda r: r.user_id not in synced_user_ids)
+            if stale_records:
+                stale_records.unlink()
+
+            return len(synced_user_ids)
+        finally:
+            if conn:
+                try:
+                    conn.enable_device()
+                except Exception:
+                    pass
+                try:
+                    conn.disconnect()
+                except Exception:
+                    pass
+
+    def action_sync_device_users(self):
+        """Button action on Biometric Device form to sync users from this device"""
+        self.ensure_one()
+        count = self._sync_users_from_device()
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'title': _('Users Synced'),
+                'message': _('Successfully synced %d user(s) from %s.') % (count, self.name),
+                'type': 'success',
+                'sticky': False,
+            }
+        }
+
+    def action_view_device_users(self):
+        """Smart button action to view users on this biometric device"""
+        self.ensure_one()
+        action = self.env['ir.actions.actions']._for_xml_id('infs_zk_biometric.biometric_device_user_action')
+        action['domain'] = [('device_id', '=', self.id)]
+        action['context'] = {'default_device_id': self.id}
+        return action
+
     def action_set_timezone(self):
         """Override to synchronize device clock to device_tz (safeguard against UTC fallback)"""
         for info in self:
@@ -149,6 +264,21 @@ class BiometricDeviceDetails(models.Model):
                                 'device_id_num': uid_str,
                                 'name': emp_name
                             })
+
+                        # Also keep biometric.device.user in sync if not yet present
+                        dev_user = self.env['biometric.device.user'].sudo().search([
+                            ('device_id', '=', info.id),
+                            ('user_id', '=', uid_str),
+                        ], limit=1)
+                        if not dev_user:
+                            self.env['biometric.device.user'].sudo().create({
+                                'device_id': info.id,
+                                'user_id': uid_str,
+                                'name': emp_name,
+                                'employee_id': get_user_id.id,
+                            })
+                        elif not dev_user.employee_id:
+                            dev_user.write({'employee_id': get_user_id.id})
 
                         # 1. Save Raw Biometric Log in zk.machine.attendance
                         duplicate_atten_ids = zk_attendance.search(

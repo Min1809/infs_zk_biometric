@@ -18,6 +18,11 @@
                 <filter string="Unlinked (Not in Employee)" name="filter_unlinked"
                         domain="[('employee_id', '=', False)]"/>
                 <separator/>
+                <filter string="Has Fingerprints" name="filter_has_fp"
+                        domain="[('fingerprint_count', '&gt;', 0)]"/>
+                <filter string="No Fingerprints Enrolled" name="filter_no_fp"
+                        domain="[('fingerprint_count', '=', 0)]"/>
+                <separator/>
                 <filter string="Admins / Managers" name="filter_admins"
                         domain="[('privilege', 'in', ('6', '14'))]"/>
 
@@ -48,12 +53,22 @@
                             class="btn-primary"
                             display="always"
                             icon="fa-refresh"/>
+                    <button name="action_sync_all_fingerprints"
+                            string="Sync Fingerprints (Entrance → Exit)"
+                            type="object"
+                            class="btn-secondary"
+                            display="always"
+                            icon="fa-hand-pointer-o"
+                            help="Copy all registered users and fingerprint templates from the Entrance (Check-In) device to the Exit (Check-Out) device"/>
                 </header>
                 <field name="user_id" string="Biometric Device ID" decoration-bf="1"/>
                 <field name="name" string="Name on Device"/>
                 <field name="employee_id" widget="many2one_avatar_employee"/>
                 <field name="department_id" optional="show"/>
                 <field name="device_id"/>
+                <field name="fingerprint_count" string="Fingerprints" widget="badge"
+                       decoration-success="fingerprint_count &gt; 0"
+                       decoration-warning="fingerprint_count == 0"/>
                 <field name="privilege" widget="badge"
                        decoration-info="privilege == '0'"
                        decoration-warning="privilege in ('2', '6')"
@@ -62,6 +77,13 @@
                 <field name="card" optional="hide"/>
                 <field name="group_id" optional="hide"/>
                 <field name="last_sync_date" optional="show"/>
+                <button name="action_sync_user_fingerprints"
+                        string="Sync Fingerprints"
+                        type="object"
+                        icon="fa-hand-pointer-o"
+                        class="btn-link"
+                        invisible="fingerprint_count == 0"
+                        help="Copy this user's fingerprints to all other biometric devices"/>
                 <button name="action_create_or_link_employee"
                         string="Create / Link Employee"
                         type="object"
@@ -90,6 +112,11 @@
                             type="object"
                             class="oe_highlight"
                             icon="fa-upload"/>
+                    <button name="action_sync_user_fingerprints"
+                            string="Sync Fingerprints to Other Devices"
+                            type="object"
+                            class="btn-secondary"
+                            icon="fa-hand-pointer-o"/>
                     <button name="action_create_or_link_employee"
                             string="Create / Link Odoo Employee"
                             type="object"
@@ -111,6 +138,7 @@
                             <field name="name"/>
                             <field name="uid" readonly="1"/>
                             <field name="privilege"/>
+                            <field name="fingerprint_count"/>
                         </group>
                         <group string="Odoo Employee Link &amp; Details">
                             <field name="employee_id"/>
@@ -149,4 +177,3 @@
               sequence="22"
               groups="hr_attendance.group_hr_attendance_officer"/>
 </odoo>
-

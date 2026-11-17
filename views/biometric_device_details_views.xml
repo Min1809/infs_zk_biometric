@@ -12,7 +12,13 @@
                         type="object"
                         class="btn-secondary"
                         icon="fa-users"
-                        help="Fetch all users stored on this biometric device into Odoo Device User List"/>
+                        help="Fetch all users and fingerprint counts stored on this biometric device into Odoo Device User List"/>
+                <button name="action_sync_fingerprints_to_other_devices"
+                        string="Sync Fingerprints to Other Devices"
+                        type="object"
+                        class="btn-secondary"
+                        icon="fa-hand-pointer-o"
+                        help="Copy all users and enrolled fingerprint templates from this device (e.g. Entrance) to all other configured devices (e.g. Exit)"/>
             </xpath>
             <xpath expr="//sheet/group" position="before">
                 <div class="oe_button_box" name="button_box">

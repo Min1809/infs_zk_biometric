@@ -61,6 +61,12 @@ class BiometricDeviceUser(models.Model):
         ('6', 'Manager'),
         ('14', 'Super Admin'),
     ], string='Privilege', default='0', required=True)
+    fingerprint_count = fields.Integer(
+        string='Fingerprints',
+        default=0,
+        readonly=True,
+        help='Number of enrolled fingerprint templates stored for this user on this device.',
+    )
     card = fields.Char(
         string='Card Number',
         help='RFID Card number stored on the device.',
@@ -83,13 +89,14 @@ class BiometricDeviceUser(models.Model):
         ),
     ]
 
-    @api.depends('name', 'user_id', 'device_id.name')
+    @api.depends('name', 'user_id', 'device_id.name', 'fingerprint_count')
     def _compute_display_name(self):
         for rec in self:
             dev_name = rec.device_id.name or ''
             uid_str = rec.user_id or ''
+            fp_info = f", {rec.fingerprint_count} FP" if rec.fingerprint_count else ""
             if dev_name and uid_str:
-                rec.display_name = f"{dev_name} (ID: {uid_str})"
+                rec.display_name = f"{dev_name} (ID: {uid_str}{fp_info})"
             else:
                 rec.display_name = rec.name or uid_str or _('Device User')
 
@@ -116,10 +123,12 @@ class BiometricDeviceUser(models.Model):
             if rec.employee_id and rec.user_id:
                 uid_clean = rec.user_id.strip()
                 if rec.employee_id.device_id_num != uid_clean:
-                    rec.employee_id.sudo().write({'device_id_num': uid_clean})
+                    rec.employee_id.sudo().with_context(skip_biometric_device_id_push=True).write({
+                        'device_id_num': uid_clean
+                    })
 
     def action_sync_all_devices(self):
-        """Connect to all configured biometric devices and sync their user lists"""
+        """Connect to all configured biometric devices and sync their user lists and fingerprint counts"""
         devices = self.env['biometric.device.details'].search([])
         if not devices:
             raise UserError(_("No Biometric Devices configured. Please configure a device first."))
@@ -152,6 +161,97 @@ class BiometricDeviceUser(models.Model):
             }
         }
 
+    def action_sync_all_fingerprints(self):
+        """Bulk sync all users and their enrolled fingerprint templates from Entrance device(s) to Exit/other device(s)"""
+        devices = self.env['biometric.device.details'].sudo().search([])
+        if len(devices) < 2:
+            raise UserError(_("At least 2 Biometric Devices (e.g. Entrance and Exit) are required to sync fingerprints between devices."))
+
+        # Prioritize Check-In (Entrance) devices as source; fallback to first device if none explicitly set to check_in
+        source_devices = devices.filtered(lambda d: d.device_type == 'check_in')
+        if not source_devices:
+            source_devices = devices[:1]
+
+        target_devices = devices - source_devices
+        if not target_devices:
+            target_devices = devices
+
+        total_users_synced = 0
+        total_fp_synced = 0
+        errors = []
+
+        for src_dev in source_devices:
+            dest_devs = [d for d in target_devices if d.id != src_dev.id]
+            if not dest_devs:
+                continue
+            try:
+                u_cnt, fp_cnt, dev_errs = src_dev._replicate_fingerprints_to_devices(dest_devs)
+                total_users_synced += u_cnt
+                total_fp_synced += fp_cnt
+                errors.extend(dev_errs)
+            except Exception as err:
+                errors.append(f"{src_dev.name}: {err}")
+
+        if errors and total_fp_synced == 0 and total_users_synced == 0:
+            raise UserError(_("Failed to sync fingerprints:\n%s") % "\n".join(errors))
+
+        msg = _("Synced %d fingerprint template(s) for %d user(s) from %s to %s.") % (
+            total_fp_synced,
+            total_users_synced,
+            ", ".join(source_devices.mapped('name')),
+            ", ".join(target_devices.mapped('name')),
+        )
+        if errors:
+            msg += _("\nWarnings: %s") % "; ".join(errors)
+
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'title': _('Fingerprints Synced'),
+                'message': msg,
+                'type': 'warning' if errors else 'success',
+                'sticky': bool(errors),
+                'next': {'type': 'ir.actions.client', 'tag': 'reload'},
+            }
+        }
+
+    def action_sync_user_fingerprints(self):
+        """Sync this specific user's fingerprint templates across all configured biometric devices"""
+        self.ensure_one()
+        uid_clean = (self.user_id or '').strip()
+        if not uid_clean:
+            raise UserError(_("This device user does not have a valid Biometric Device ID."))
+
+        if self.employee_id:
+            return self.employee_id.action_sync_employee_fingerprints()
+
+        # If not linked to an employee yet, sync by user_id directly from this user's device (or entrance device) to other devices
+        devices = self.env['biometric.device.details'].sudo().search([])
+        other_devices = devices.filtered(lambda d: d.id != self.device_id.id)
+        if not other_devices:
+            raise UserError(_("No other Biometric Devices configured to sync fingerprints to."))
+
+        u_cnt, fp_cnt, errs = self.device_id._replicate_fingerprints_to_devices(
+            other_devices, only_user_ids={uid_clean}
+        )
+        if errs and fp_cnt == 0:
+            raise UserError(_("Failed to sync fingerprints for ID %s:\n%s") % (uid_clean, "\n".join(errs)))
+
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'title': _('User Fingerprints Synced'),
+                'message': _("Synced %d fingerprint(s) for %s (ID: %s) to %s.") % (
+                    fp_cnt, self.name, uid_clean, ", ".join(other_devices.mapped('name'))
+                ),
+                'type': 'success',
+                'sticky': False,
+                'next': {'type': 'ir.actions.client', 'tag': 'reload'},
+            }
+        }
+
     def action_create_or_link_employee(self):
         """Link to existing employee by name/ID or create a new Odoo Employee from this Device User"""
         self.ensure_one()
@@ -164,12 +264,12 @@ class BiometricDeviceUser(models.Model):
         if not emp and self.name:
             emp = Employee.search([('name', '=ilike', self.name.strip())], limit=1)
             if emp and not emp.device_id_num:
-                emp.write({'device_id_num': uid_clean})
+                emp.with_context(skip_biometric_device_id_push=True).write({'device_id_num': uid_clean})
             else:
                 emp = False
 
         if not emp:
-            emp = Employee.create({
+            emp = Employee.with_context(skip_biometric_device_id_push=True).create({
                 'name': self.name or f"Employee {uid_clean}",
                 'device_id_num': uid_clean,
             })
@@ -207,6 +307,8 @@ class BiometricDeviceUser(models.Model):
                 existing_users = conn.get_users() or []
                 uid_clean = str(rec.user_id).strip()
                 matched_user = next((u for u in existing_users if str(u.user_id).strip() == uid_clean), None)
+                if not matched_user and rec.uid:
+                    matched_user = next((u for u in existing_users if getattr(u, 'uid', 0) == rec.uid), None)
 
                 if matched_user:
                     target_uid = matched_user.uid

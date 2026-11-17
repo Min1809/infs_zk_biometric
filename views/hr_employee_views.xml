@@ -5,7 +5,7 @@
         <field name="model">hr.employee</field>
         <field name="inherit_id" ref="hr_zk_attendance.view_employee_form"/>
         <field name="arch" type="xml">
-            <!-- Header button for quick access -->
+            <!-- Header buttons for quick access -->
             <xpath expr="//header" position="inside">
                 <button name="action_create_user_on_device"
                         string="Create / Sync in Biometric Device"
@@ -14,9 +14,17 @@
                         icon="fa-id-badge"
                         groups="hr.group_hr_user"
                         help="Create or update this employee on all configured ZKTeco fingerprint devices and link Biometric Device ID"/>
+                <button name="action_sync_employee_fingerprints"
+                        string="Sync Fingerprints (Entrance → Exit)"
+                        type="object"
+                        class="btn-secondary"
+                        icon="fa-hand-pointer-o"
+                        groups="hr.group_hr_user"
+                        invisible="not device_id_num"
+                        help="Fetch this employee's registered fingerprint scan from the Entrance device and copy it to the Exit / other biometric devices"/>
             </xpath>
 
-            <!-- Enhance device_id_num in HR Settings tab with inline action button & synced devices -->
+            <!-- Enhance device_id_num in HR Settings tab with inline action buttons & synced devices -->
             <xpath expr="//field[@name='device_id_num']" position="replace">
                 <label for="device_id_num"/>
                 <div class="o_row">
@@ -28,6 +36,14 @@
                             icon="fa-upload"
                             groups="hr.group_hr_user"
                             help="Create this employee on all configured biometric devices and assign Biometric Device ID"/>
+                    <button name="action_sync_employee_fingerprints"
+                            string="Sync Fingerprints"
+                            type="object"
+                            class="btn-link"
+                            icon="fa-hand-pointer-o"
+                            groups="hr.group_hr_user"
+                            invisible="not device_id_num"
+                            help="Copy registered fingerprint templates for this employee from Entrance device to Exit device"/>
                 </div>
                 <field name="is_synced_to_biometric" invisible="1"/>
                 <field name="biometric_user_ids"
@@ -39,4 +55,3 @@
         </field>
     </record>
 </odoo>
-

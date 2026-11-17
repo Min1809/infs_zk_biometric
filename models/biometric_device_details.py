@@ -84,6 +84,19 @@ class BiometricDeviceDetails(models.Model):
 
             conn.disable_device()
             zk_users = conn.get_users() or []
+            try:
+                zk_templates = conn.get_templates() or []
+            except Exception as tpl_err:
+                _logger.warning("Could not fetch fingerprint templates from %s: %s", self.name, tpl_err)
+                zk_templates = []
+
+            fp_count_by_uid = {}
+            for tpl in zk_templates:
+                if getattr(tpl, 'valid', 1):
+                    t_uid = getattr(tpl, 'uid', 0)
+                    if t_uid:
+                        fp_count_by_uid[t_uid] = fp_count_by_uid.get(t_uid, 0) + 1
+
             DeviceUser = self.env['biometric.device.user'].sudo()
             Employee = self.env['hr.employee'].sudo()
 
@@ -110,13 +123,15 @@ class BiometricDeviceDetails(models.Model):
                 card_val = getattr(u, 'card', 0)
                 card_str = str(card_val) if card_val else ''
                 u_name = (getattr(u, 'name', '') or '').strip() or f"User {uid_str}"
+                internal_uid = getattr(u, 'uid', 0) or 0
 
                 vals = {
                     'device_id': self.id,
-                    'uid': getattr(u, 'uid', 0) or 0,
+                    'uid': internal_uid,
                     'user_id': uid_str,
                     'name': u_name,
                     'privilege': priv_str,
+                    'fingerprint_count': fp_count_by_uid.get(internal_uid, 0),
                     'card': card_str,
                     'group_id': str(getattr(u, 'group_id', '') or ''),
                     'employee_id': emp_by_dev_id.get(uid_str, False),
@@ -144,6 +159,203 @@ class BiometricDeviceDetails(models.Model):
                     conn.disconnect()
                 except Exception:
                     pass
+
+    def _replicate_fingerprints_to_devices(self, target_devices, only_user_ids=None):
+        """Read users & fingerprint templates from self (source device) and replicate to target_devices"""
+        self.ensure_one()
+        errors = []
+        try:
+            src_zk = ZK(self.device_ip, port=self.port_number, timeout=15,
+                        password=0, force_udp=False, ommit_ping=False)
+        except NameError:
+            raise UserError(_("Pyzk module not Found. Please install it with 'pip3 install pyzk'."))
+
+        src_conn = None
+        src_users = []
+        src_templates = []
+        try:
+            src_conn = self.device_connect(src_zk)
+            if not src_conn:
+                raise UserError(_("Unable to connect to source device %s (%s).") % (self.name, self.device_ip))
+            src_conn.disable_device()
+            src_users = src_conn.get_users() or []
+            src_templates = src_conn.get_templates() or []
+        finally:
+            if src_conn:
+                try:
+                    src_conn.enable_device()
+                except Exception:
+                    pass
+                try:
+                    src_conn.disconnect()
+                except Exception:
+                    pass
+
+        # Map source templates by internal uid -> list of Finger objects
+        templates_by_src_uid = {}
+        for tpl in src_templates:
+            if getattr(tpl, 'valid', 1):
+                templates_by_src_uid.setdefault(tpl.uid, []).append(tpl)
+
+        # Filter source users
+        users_to_sync = []
+        for u in src_users:
+            uid_str = str(getattr(u, 'user_id', '') or '').strip()
+            if not uid_str:
+                continue
+            if only_user_ids and uid_str not in only_user_ids:
+                continue
+            users_to_sync.append(u)
+
+        # Update source device records in Odoo
+        try:
+            self._sync_users_from_device()
+        except Exception:
+            pass
+
+        users_synced_set = set()
+        total_fp_copied = 0
+        DeviceUser = self.env['biometric.device.user'].sudo()
+        Employee = self.env['hr.employee'].sudo()
+        employees = Employee.search([('device_id_num', '!=', False)])
+        emp_by_dev_id = {emp.device_id_num.strip(): emp.id for emp in employees if emp.device_id_num and emp.device_id_num.strip()}
+        valid_privs = {'0', '2', '6', '14'}
+
+        for dest_dev in target_devices:
+            if dest_dev.id == self.id:
+                continue
+            dest_conn = None
+            try:
+                dest_zk = ZK(dest_dev.device_ip, port=dest_dev.port_number, timeout=15,
+                             password=0, force_udp=False, ommit_ping=False)
+                dest_conn = dest_dev.device_connect(dest_zk)
+                if not dest_conn:
+                    errors.append(f"{dest_dev.name} ({dest_dev.device_ip}): Unable to connect")
+                    continue
+
+                dest_conn.disable_device()
+                dest_users = dest_conn.get_users() or []
+                dest_user_by_userid = {str(getattr(du, 'user_id', '')).strip(): du for du in dest_users if getattr(du, 'user_id', '')}
+                max_dest_uid = max([getattr(du, 'uid', 0) or 0 for du in dest_users], default=0)
+
+                for src_u in users_to_sync:
+                    uid_str = str(src_u.user_id).strip()
+                    src_fingers = templates_by_src_uid.get(src_u.uid, [])
+                    # If single-user sync and bulk get_templates didn't return, fallback to get_user_template per finger
+                    dest_u = dest_user_by_userid.get(uid_str)
+
+                    safe_name = (getattr(src_u, 'name', '') or f"User {uid_str}").strip()[:24]
+                    priv_int = int(getattr(src_u, 'privilege', 0) or 0)
+                    pwd = getattr(src_u, 'password', '') or ''
+                    grp = str(getattr(src_u, 'group_id', '') or '')
+                    card_val = int(getattr(src_u, 'card', 0) or 0)
+
+                    if dest_u:
+                        target_uid = dest_u.uid
+                    else:
+                        max_dest_uid += 1
+                        target_uid = max_dest_uid
+
+                    # Ensure user exists / is updated on destination device
+                    dest_conn.set_user(
+                        uid=target_uid,
+                        name=safe_name,
+                        privilege=priv_int,
+                        password=pwd,
+                        group_id=grp,
+                        user_id=uid_str,
+                        card=card_val,
+                    )
+
+                    # Re-fetch or construct User object with target_uid for save_user_template
+                    if src_fingers:
+                        from zk.user import User
+                        from zk.finger import Finger
+                        target_user_obj = User(
+                            target_uid,
+                            safe_name,
+                            priv_int,
+                            pwd,
+                            grp,
+                            uid_str,
+                            card_val,
+                        )
+                        mapped_fingers = [
+                            Finger(target_uid, f.fid, f.valid, f.template)
+                            for f in src_fingers
+                        ]
+                        dest_conn.save_user_template(target_user_obj, mapped_fingers)
+                        total_fp_copied += len(mapped_fingers)
+                        users_synced_set.add(uid_str)
+                    else:
+                        users_synced_set.add(uid_str)
+
+                    # Sync Odoo biometric.device.user record for destination device
+                    priv_str = str(priv_int) if str(priv_int) in valid_privs else '0'
+                    dev_rec = DeviceUser.search([
+                        ('device_id', '=', dest_dev.id),
+                        ('user_id', '=', uid_str),
+                    ], limit=1)
+                    vals = {
+                        'device_id': dest_dev.id,
+                        'uid': target_uid,
+                        'user_id': uid_str,
+                        'name': safe_name,
+                        'privilege': priv_str,
+                        'fingerprint_count': len(src_fingers),
+                        'card': str(card_val) if card_val else '',
+                        'group_id': grp,
+                        'employee_id': emp_by_dev_id.get(uid_str, False),
+                        'last_sync_date': fields.Datetime.now(),
+                    }
+                    if dev_rec:
+                        dev_rec.write(vals)
+                    else:
+                        DeviceUser.create(vals)
+
+                dest_conn.refresh_data()
+            except Exception as err:
+                errors.append(f"{dest_dev.name}: {err}")
+            finally:
+                if dest_conn:
+                    try:
+                        dest_conn.enable_device()
+                    except Exception:
+                        pass
+                    try:
+                        dest_conn.disconnect()
+                    except Exception:
+                        pass
+
+        return len(users_synced_set), total_fp_copied, errors
+
+    def action_sync_fingerprints_to_other_devices(self):
+        """Button on Biometric Device form to push all users & fingerprints from this device to other devices"""
+        self.ensure_one()
+        other_devices = self.env['biometric.device.details'].sudo().search([('id', '!=', self.id)])
+        if not other_devices:
+            raise UserError(_("No other Biometric Devices configured to sync fingerprints to."))
+
+        u_cnt, fp_cnt, errors = self._replicate_fingerprints_to_devices(other_devices)
+        if errors and u_cnt == 0 and fp_cnt == 0:
+            raise UserError(_("Failed to sync fingerprints from %s:\n%s") % (self.name, "\n".join(errors)))
+
+        msg = _("Synced %d fingerprint template(s) across %d user(s) from %s to %s.") % (
+            fp_cnt, u_cnt, self.name, ", ".join(other_devices.mapped('name'))
+        )
+        if errors:
+            msg += _("\nWarnings: %s") % "; ".join(errors)
+
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'title': _('Fingerprints Replicated'),
+                'message': msg,
+                'type': 'warning' if errors else 'success',
+                'sticky': bool(errors),
+            }
+        }
 
     def action_sync_device_users(self):
         """Button action on Biometric Device form to sync users from this device"""

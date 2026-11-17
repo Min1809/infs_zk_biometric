@@ -118,7 +118,6 @@ class BiometricDeviceUser(models.Model):
                 if rec.employee_id.device_id_num != uid_clean:
                     rec.employee_id.sudo().write({'device_id_num': uid_clean})
 
-    @api.model
     def action_sync_all_devices(self):
         """Connect to all configured biometric devices and sync their user lists"""
         devices = self.env['biometric.device.details'].search([])

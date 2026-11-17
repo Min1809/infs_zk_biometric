@@ -160,26 +160,51 @@ class BiometricDeviceDetails(models.Model):
                 except Exception:
                     pass
 
-    def _replicate_fingerprints_to_devices(self, target_devices, only_user_ids=None):
+    def _replicate_fingerprints_to_devices(self, target_devices, only_user_ids=None, preloaded_fingers_by_userid=None):
         """Read users & fingerprint templates from self (source device) and replicate to target_devices"""
         self.ensure_one()
         errors = []
         try:
-            src_zk = ZK(self.device_ip, port=self.port_number, timeout=15,
-                        password=0, force_udp=False, ommit_ping=False)
+            src_zk = ZK(self.device_ip, port=self.port_number, timeout=30,
+                        password=0, force_udp=False, ommit_ping=True)
         except NameError:
             raise UserError(_("Pyzk module not Found. Please install it with 'pip3 install pyzk'."))
 
         src_conn = None
         src_users = []
         src_templates = []
+        fallback_fingers_by_uid = {}
         try:
             src_conn = self.device_connect(src_zk)
             if not src_conn:
                 raise UserError(_("Unable to connect to source device %s (%s).") % (self.name, self.device_ip))
             src_conn.disable_device()
             src_users = src_conn.get_users() or []
-            src_templates = src_conn.get_templates() or []
+            try:
+                src_templates = src_conn.get_templates() or []
+            except Exception as tpl_err:
+                _logger.warning("get_templates() failed on %s: %s", self.name, tpl_err)
+                src_templates = []
+
+            # If syncing specific user(s) and bulk get_templates returned none for them, read per-finger (0..9)
+            if only_user_ids:
+                tpl_uids = {getattr(t, 'uid', 0) for t in src_templates if getattr(t, 'valid', 1)}
+                for u in src_users:
+                    u_id_str = str(getattr(u, 'user_id', '') or '').strip()
+                    if u_id_str in only_user_ids and u.uid not in tpl_uids:
+                        if preloaded_fingers_by_userid and u_id_str in preloaded_fingers_by_userid:
+                            fallback_fingers_by_uid[u.uid] = preloaded_fingers_by_userid[u_id_str]
+                        else:
+                            u_fingers = []
+                            for fid in range(10):
+                                try:
+                                    fp = src_conn.get_user_template(uid=u.uid, temp_id=fid)
+                                    if fp and getattr(fp, 'template', None) and len(fp.template) > 0:
+                                        u_fingers.append(fp)
+                                except Exception:
+                                    continue
+                            if u_fingers:
+                                fallback_fingers_by_uid[u.uid] = u_fingers
         finally:
             if src_conn:
                 try:
@@ -192,7 +217,7 @@ class BiometricDeviceDetails(models.Model):
                     pass
 
         # Map source templates by internal uid -> list of Finger objects
-        templates_by_src_uid = {}
+        templates_by_src_uid = dict(fallback_fingers_by_uid)
         for tpl in src_templates:
             if getattr(tpl, 'valid', 1):
                 templates_by_src_uid.setdefault(tpl.uid, []).append(tpl)

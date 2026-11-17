@@ -520,17 +520,20 @@ class HrEmployee(models.Model):
         source_fingers = []
         source_user = None
         connection_errors = []
+        connected_any_device = False
+        user_found_on_devices = []
 
         for device in sorted_devices:
             conn = None
             try:
-                zk = ZK(device.device_ip, port=device.port_number, timeout=15,
-                        password=0, force_udp=False, ommit_ping=False)
+                zk = ZK(device.device_ip, port=device.port_number, timeout=30,
+                        password=0, force_udp=False, ommit_ping=True)
                 conn = device.device_connect(zk)
                 if not conn:
-                    connection_errors.append(f"{device.name}: Unable to connect")
+                    connection_errors.append(f"{device.name} ({device.device_ip}:{device.port_number}): Unable to connect")
                     continue
 
+                connected_any_device = True
                 conn.disable_device()
                 zk_users = conn.get_users() or []
                 matched_u = next(
@@ -540,19 +543,22 @@ class HrEmployee(models.Model):
                 if not matched_u:
                     continue
 
+                user_found_on_devices.append(device.name)
+
                 # Read templates for this user (try bulk get_templates first, then fallback to get_user_template 0..9)
                 user_fingers = []
                 try:
                     all_tpls = conn.get_templates() or []
                     user_fingers = [t for t in all_tpls if getattr(t, 'uid', 0) == matched_u.uid and getattr(t, 'valid', 1)]
-                except Exception:
+                except Exception as tpl_err:
+                    _logger.warning("get_templates() failed on %s: %s. Falling back to get_user_template.", device.name, tpl_err)
                     user_fingers = []
 
                 if not user_fingers:
                     for fid in range(10):
                         try:
                             fp = conn.get_user_template(uid=matched_u.uid, temp_id=fid)
-                            if fp and getattr(fp, 'valid', 0):
+                            if fp and getattr(fp, 'template', None) and len(fp.template) > 0:
                                 user_fingers.append(fp)
                         except Exception:
                             continue
@@ -573,7 +579,7 @@ class HrEmployee(models.Model):
                         })
                     break
             except Exception as err:
-                connection_errors.append(f"{device.name}: {err}")
+                connection_errors.append(f"{device.name} ({device.device_ip}): {err}")
             finally:
                 if conn:
                     try:
@@ -585,16 +591,32 @@ class HrEmployee(models.Model):
                     except Exception:
                         pass
 
-        if not source_device or not source_fingers:
+        if not connected_any_device:
             raise UserError(_(
-                "No registered fingerprint templates found for '%s' (Biometric ID: %s) on any connected device.\n"
-                "Please register the employee's fingerprint on the Entrance device first, then click Sync Fingerprints."
-            ) % (self.name, uid_clean))
+                "Could not connect to any Biometric Device from this server:\n%s\n\n"
+                "(Note: If you are running Odoo on your local PC and the biometric devices are only reachable from the live server or office LAN, this action must be run from the server that can reach the device IP.)"
+            ) % "\n".join(connection_errors))
+
+        if not user_found_on_devices:
+            msg = _("User '%s' (Biometric ID: %s) was not found on the connected device(s).") % (self.name, uid_clean)
+            if connection_errors:
+                msg += _("\n\nUnreachable device(s):\n%s") % "\n".join(connection_errors)
+            raise UserError(msg)
+
+        if not source_device or not source_fingers:
+            msg = _(
+                "Connected to %s and found user '%s' (Biometric ID: %s), but 0 fingerprint templates were returned by the device."
+            ) % (", ".join(user_found_on_devices), self.name, uid_clean)
+            if connection_errors:
+                msg += _("\n\nUnreachable device(s):\n%s") % "\n".join(connection_errors)
+            raise UserError(msg)
 
         # Push user & fingerprint templates to all other devices (e.g. Exit device)
         target_devices = devices.filtered(lambda d: d.id != source_device.id)
         u_cnt, fp_cnt, repl_errors = source_device._replicate_fingerprints_to_devices(
-            target_devices, only_user_ids={uid_clean}
+            target_devices,
+            only_user_ids={uid_clean},
+            preloaded_fingers_by_userid={uid_clean: source_fingers},
         )
         connection_errors.extend(repl_errors)
 

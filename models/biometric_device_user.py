@@ -106,10 +106,10 @@ class BiometricDeviceUser(models.Model):
         user_ids = [r.user_id.strip() for r in self if r.user_id and r.user_id.strip()]
         emp_map = {}
         if user_ids:
-            employees = self.env['hr.employee'].sudo().search([
+            employees = self.env['hr.employee'].sudo().with_context(active_test=False).search([
                 ('device_id_num', 'in', user_ids)
             ])
-            for emp in employees:
+            for emp in sorted(employees, key=lambda e: 0 if e.active else 1):
                 if emp.device_id_num and emp.device_id_num.strip() not in emp_map:
                     emp_map[emp.device_id_num.strip()] = emp.id
 
@@ -260,9 +260,9 @@ class BiometricDeviceUser(models.Model):
             raise UserError(_("This device user does not have a valid Biometric Device ID."))
 
         Employee = self.env['hr.employee'].sudo()
-        emp = Employee.search([('device_id_num', '=', uid_clean)], limit=1)
+        emp = Employee.with_context(active_test=False).search([('device_id_num', '=', uid_clean)], limit=1)
         if not emp and self.name:
-            emp = Employee.search([('name', '=ilike', self.name.strip())], limit=1)
+            emp = Employee.with_context(active_test=False).search([('name', '=ilike', self.name.strip())], limit=1)
             if emp and not emp.device_id_num:
                 emp.with_context(skip_biometric_device_id_push=True).write({'device_id_num': uid_clean})
             else:

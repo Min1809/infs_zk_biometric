@@ -103,8 +103,12 @@ class BiometricDeviceDetails(models.Model):
             existing_records = DeviceUser.search([('device_id', '=', self.id)])
             existing_by_uid = {r.user_id: r for r in existing_records if r.user_id}
 
-            employees = Employee.search([('device_id_num', '!=', False)])
-            emp_by_dev_id = {emp.device_id_num.strip(): emp.id for emp in employees if emp.device_id_num and emp.device_id_num.strip()}
+            employees = Employee.with_context(active_test=False).search([('device_id_num', '!=', False)])
+            # Prefer active employees if any duplicate exists
+            emp_by_dev_id = {}
+            for emp in sorted(employees, key=lambda e: 0 if e.active else 1):
+                if emp.device_id_num and emp.device_id_num.strip() not in emp_by_dev_id:
+                    emp_by_dev_id[emp.device_id_num.strip()] = emp.id
 
             valid_privs = {'0', '2', '6', '14'}
             now_dt = fields.Datetime.now()
@@ -497,7 +501,11 @@ class BiometricDeviceDetails(models.Model):
                         get_user_id = self.env['hr.employee'].sudo().search(
                             [('device_id_num', '=', uid_str)], limit=1)
                         if not get_user_id:
-                            get_user_id = self.env['hr.employee'].sudo().create({
+                            # Also check archived (inactive) employees so we don't try to create a duplicate for resigned staff
+                            get_user_id = self.env['hr.employee'].sudo().with_context(active_test=False).search(
+                                [('device_id_num', '=', uid_str)], limit=1)
+                        if not get_user_id:
+                            get_user_id = self.env['hr.employee'].sudo().with_context(skip_biometric_device_id_push=True).create({
                                 'device_id_num': uid_str,
                                 'name': emp_name
                             })
